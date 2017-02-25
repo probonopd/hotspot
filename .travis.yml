@@ -34,4 +34,4 @@ script:
   # is not relative to libQt5Core.so but to the binary that is being executed, is this clever?
   - ( cd ./appdir/usr/lib/hotspot/ ;  ln -s ../../plugins/ . )
   - ./linuxdeployqt*.AppImage ./appdir/usr/bin/hotspot -appimage 
-  - curl --upload-file ./Hotspot-*.AppImage https://transfer.sh/Hotspot-git.$(git rev-parse --short HEAD)-x86_64.AppImage 
+  - curl --upload-file ./Hotspot-*.AppImage https://transfer.sh/Hotspot-git.$(git rev-parse --short HEAD)-x86_64.AppImage
