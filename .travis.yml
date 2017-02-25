@@ -8,7 +8,7 @@ before_install:
     - sudo apt-get update -qq
     
 install: 
-    - sudo apt-get -y install qt58base elfutils libelf-dev
+    - sudo apt-get -y install qt58base elfutils libelf-dev libdw-dev libasm-dev
     - source /opt/qt58/bin/qt58-env.sh
     - git clone git://anongit.kde.org/extra-cmake-modules
     - cd extra-cmake-modules
