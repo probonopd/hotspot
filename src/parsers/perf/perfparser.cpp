@@ -37,10 +37,10 @@
 
 #include <ThreadWeaver/ThreadWeaver>
 
-#include <models/framedata.h>
 #include <models/summarydata.h>
-
 #include <util.h>
+
+#include <functional>
 
 Q_LOGGING_CATEGORY(LOG_PERFPARSER, "hotspot.perfparser", QtWarningMsg)
 
@@ -92,6 +92,8 @@ struct AttributesDefinition
     quint32 type = 0;
     quint64 config = 0;
     StringId name;
+    bool usesFrequency = false;
+    quint64 frequencyOrPeriod = 0;
 };
 
 QDataStream& operator>>(QDataStream& stream, AttributesDefinition& attributesDefinition)
@@ -99,7 +101,9 @@ QDataStream& operator>>(QDataStream& stream, AttributesDefinition& attributesDef
     return stream >> attributesDefinition.id
                   >> attributesDefinition.type
                   >> attributesDefinition.config
-                  >> attributesDefinition.name;
+                  >> attributesDefinition.name
+                  >> attributesDefinition.usesFrequency
+                  >> attributesDefinition.frequencyOrPeriod;
 }
 
 QDebug operator<<(QDebug stream, const AttributesDefinition& attributesDefinition)
@@ -108,7 +112,9 @@ QDebug operator<<(QDebug stream, const AttributesDefinition& attributesDefinitio
         << "id=" << attributesDefinition.id << ", "
         << "type=" << attributesDefinition.type << ", "
         << "config=" << attributesDefinition.config << ", "
-        << "name=" << attributesDefinition.name
+        << "name=" << attributesDefinition.name << ", "
+        << "usesFrequency=" << attributesDefinition.usesFrequency << ", "
+        << "frequencyOrPeriod=" << attributesDefinition.frequencyOrPeriod
         << "}";
     return stream;
 }
@@ -273,12 +279,15 @@ struct Sample : Record
     QVector<qint32> frames;
     quint8 guessedFrames = 0;
     qint32 attributeId = 0;
+    quint64 period = 0;
+    quint64 weight = 0;
 };
 
 QDataStream& operator>>(QDataStream& stream, Sample& sample)
 {
     return stream >> static_cast<Record&>(sample)
-        >> sample.frames >> sample.guessedFrames >> sample.attributeId;
+        >> sample.frames >> sample.guessedFrames >> sample.attributeId
+        >> sample.period >> sample.weight;
 }
 
 QDebug operator<<(QDebug stream, const Sample& sample)
@@ -287,7 +296,9 @@ QDebug operator<<(QDebug stream, const Sample& sample)
         << static_cast<const Record&>(sample) << ", "
         << "frames=" << sample.frames << ", "
         << "guessedFrames=" << sample.guessedFrames << ", "
-        << "attributeId=" << sample.attributeId
+        << "attributeId=" << sample.attributeId << ", "
+        << "period=" << sample.period << ", "
+        << "weight=" << sample.weight
         << "}";
     return stream;
 }
@@ -419,7 +430,6 @@ QDebug operator<<(QDebug stream, const GroupDesc& groupDesc)
     return stream;
 }
 
-
 struct FeaturesDefinition
 {
     QByteArray hostName;
@@ -478,74 +488,67 @@ QDebug operator<<(QDebug stream, const FeaturesDefinition& featuresDefinition)
     return stream;
 }
 
+struct Error
+{
+    enum Code {
+        BrokenDataFile = 1,
+        MissingElfFile = 2,
+        InvalidKallsyms = 3,
+    };
+    Code code;
+    QString message;
+};
+
+QDataStream& operator>>(QDataStream& stream, Error::Code& code)
+{
+    int c = 0;
+    stream >> c;
+    code = static_cast<Error::Code>(c);
+    return stream;
+}
+
+QDataStream& operator>>(QDataStream& stream, Error& error)
+{
+    return stream >> error.code >> error.message;
+}
+
+QDebug operator<<(QDebug stream, const Error& error)
+{
+    stream.noquote().nospace() << "Error{"
+        << "code=" << error.code << ", "
+        << "message=" << error.message
+        << "}";
+    return stream;
+}
+
 struct LocationData
 {
-    LocationData(qint32 parentLocationId = -1, const QString& location = {},
-                 const QString& address = {})
+    LocationData(qint32 parentLocationId = -1, const Data::Location& location = {})
         : parentLocationId(parentLocationId)
         , location(location)
-        , address(address)
     { }
 
     qint32 parentLocationId = -1;
-    QString location;
-    QString address;
+    Data::Location location;
 };
-
-struct SymbolData
-{
-    QString symbol;
-    QString binary;
-
-    bool isValid() const
-    {
-        return !symbol.isEmpty() || !binary.isEmpty();
-    }
-};
-
-struct CallerCalleeLocation
-{
-    QString symbol;
-    QString binary;
-
-    bool operator<(const CallerCalleeLocation &location) const
-    {
-        return std::tie(symbol, binary) < std::tie(location.symbol, location.binary);
-    }
-};
-
-inline bool operator==(const CallerCalleeLocation &location1, const CallerCalleeLocation &location2)
-{
-    return location1.symbol == location2.symbol && location1.binary == location2.binary;
-}
-
-inline bool operator!=(const CallerCalleeLocation &location1, const CallerCalleeLocation &location2)
-{
-    return !(location1.symbol == location2.symbol && location1.binary == location2.binary);
-}
-
-inline uint qHash(const CallerCalleeLocation &key, uint seed = 0)
-{
-    Util::HashCombine hash;
-    seed = hash(seed, key.symbol);
-    seed = hash(seed, key.binary);
-    return seed;
-}
-
 }
 
 Q_DECLARE_TYPEINFO(AttributesDefinition, Q_MOVABLE_TYPE);
 Q_DECLARE_TYPEINFO(LocationData, Q_MOVABLE_TYPE);
-Q_DECLARE_TYPEINFO(SymbolData, Q_MOVABLE_TYPE);
 
 struct PerfParserPrivate
 {
-    PerfParserPrivate()
+    PerfParserPrivate(std::function<void(float)> progressHandler)
+        : progressHandler(progressHandler)
     {
         buffer.buffer().reserve(1024);
         buffer.open(QIODevice::ReadOnly);
         stream.setDevice(&buffer);
         process.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+
+        if (qEnvironmentVariableIntValue("HOTSPOT_GENERATE_SCRIPT_OUTPUT")) {
+            perfScriptOutput.reset(new QTextStream(stdout));
+        }
     }
 
     bool tryParse()
@@ -630,10 +633,17 @@ struct PerfParserPrivate
         }
 
         switch (static_cast<EventType>(eventType)) {
+            case EventType::Sample43: // fall-through
             case EventType::Sample: {
                 Sample sample;
                 stream >> sample;
                 qCDebug(LOG_PERFPARSER) << "parsed:" << sample;
+                if (!sample.period) {
+                    const auto& attribute = attributes.value(sample.attributeId);
+                    if (!attribute.usesFrequency) {
+                        sample.period = attribute.frequencyOrPeriod;
+                    }
+                }
                 addSample(sample);
                 break;
             }
@@ -698,6 +708,20 @@ struct PerfParserPrivate
                 setFeatures(featuresDefinition);
                 break;
             }
+            case EventType::Error: {
+                Error error;
+                stream >> error;
+                qCDebug(LOG_PERFPARSER) << "parsed:" << error;
+                addError(error);
+                break;
+            }
+            case EventType::Progress: {
+                float progress = 0;
+                stream >> progress;
+                qCDebug(LOG_PERFPARSER) << "parsed:" << progress;
+                progressHandler(progress);
+                break;
+            }
             case EventType::InvalidType:
                 break;
         }
@@ -713,7 +737,7 @@ struct PerfParserPrivate
 
     void finalize()
     {
-        FrameData::initializeParents(&bottomUpResult);
+        Data::BottomUp::initializeParents(&bottomUpResult.root);
 
         calculateSummary();
 
@@ -723,13 +747,16 @@ struct PerfParserPrivate
 
     void addAttributes(const AttributesDefinition& attributesDefinition)
     {
+        const auto label = strings.value(attributesDefinition.name.id);
+        summaryResult.costs.push_back({label, 0, 0});
+        bottomUpResult.costs.addType(attributesDefinition.id, label);
         attributes.push_back(attributesDefinition);
     }
 
     void addCommand(const Command& command)
     {
         // TODO: keep track of list of commands for filtering later on
-        Q_UNUSED(command);
+        commands[command.pid][command.tid] = strings.value(command.comm.id);
     }
 
     void addLocation(const LocationDefinition& location)
@@ -745,55 +772,26 @@ struct PerfParserPrivate
         }
         locations.push_back({
             location.location.parentLocationId,
-            locationString,
-            QString::number(location.location.address, 16)
+            {location.location.address, locationString}
         });
         symbols.push_back({});
     }
 
     void addSymbol(const SymbolDefinition& symbol)
     {
-        // TODO: do we need to handle pid/tid here?
-        // TODO: store binary, isKernel information
+        // empty symbol was added in addLocation already
         Q_ASSERT(symbols.size() > symbol.id);
-        symbols[symbol.id] = {
-            strings.value(symbol.symbol.name.id),
-            strings.value(symbol.symbol.binary.id)
-        };
+        // TODO: isKernel information
+        const auto symbolString = strings.value(symbol.symbol.name.id);
+        const auto binaryString = strings.value(symbol.symbol.binary.id);
+        symbols[symbol.id] = {symbolString, binaryString};
+        if (symbolString.isEmpty() && !reportedMissingDebugInfoModules.contains(symbol.symbol.binary.id)) {
+            reportedMissingDebugInfoModules.insert(symbol.symbol.binary.id);
+            summaryResult.errors << PerfParser::tr("Module \"%1\" is missing (some) debug symbols.").arg(binaryString);
+        }
     }
 
-    static FrameData* addFrame(FrameData* parent,
-                               const QString& symbol, const QString& binary,
-                               const QString& location, const QString& address)
-    {
-        FrameData* ret = nullptr;
-
-        for (auto row = parent->children.data(), end = row + parent->children.size();
-             row != end; ++row)
-        {
-            // TODO: implement aggregation, i.e. to ignore location address
-            if (row->symbol == symbol && row->binary == binary
-                && row->location == location && row->address == address)
-            {
-                ret = row;
-                break;
-            }
-        }
-
-        if (!ret) {
-            FrameData frame;
-            frame.symbol = symbol;
-            frame.binary = binary;
-            frame.location = location;
-            frame.address = address;
-            parent->children.append(frame);
-            ret = &parent->children.last();
-        }
-
-        return ret;
-    }
-
-    FrameData* addFrame(FrameData* parent, qint32 id) const
+    Data::BottomUp* addFrame(Data::BottomUp* parent, qint32 id, QSet<Data::Symbol>* recursionGuard, int type, quint64 period)
     {
         bool skipNextFrame = false;
         while (id != -1) {
@@ -812,12 +810,21 @@ struct PerfParserPrivate
                 skipNextFrame = true;
             }
 
-            auto ret = addFrame(parent, symbol.symbol, symbol.binary,
-                                location.location, location.address);
+            auto ret = parent->entryForSymbol(symbol, &maxBottomUpId);
+            bottomUpResult.costs.add(type, ret->id, period);
 
-            ++ret->inclusiveCost;
-            if (parent == &bottomUpResult) {
-                ++ret->selfCost;
+            if (perfScriptOutput) {
+                *perfScriptOutput << '\t' << hex << qSetFieldWidth(16) << location.location.address
+                                  << qSetFieldWidth(0) << dec << ' '
+                                  << (symbol.symbol.isEmpty() ? QStringLiteral("[unknown]") : symbol.symbol)
+                                  << " (" << symbol.binary << ")\n";
+            }
+
+            auto recursionIt = recursionGuard->find(symbol);
+            if (recursionIt == recursionGuard->end()) {
+                auto& locationCost = callerCalleeResult.entry(symbol).source(location.location.location, bottomUpResult.costs.numTypes());
+                locationCost[type] += period;
+                recursionGuard->insert(symbol);
             }
 
             parent = ret;
@@ -841,84 +848,35 @@ struct PerfParserPrivate
 
     void addSampleToBottomUp(const Sample& sample)
     {
-        ++bottomUpResult.inclusiveCost;
-        auto parent = &bottomUpResult;
-        for (auto id : sample.frames) {
-            parent = addFrame(parent, id);
+        if (perfScriptOutput) {
+            *perfScriptOutput << commands.value(sample.pid).value(sample.pid) << '\t' << sample.pid << '\t'
+                              << sample.time / 1000000000 << '.'
+                              << qSetFieldWidth(9) << qSetPadChar(QLatin1Char('0'))
+                              << sample.time % 1000000000
+                              << qSetFieldWidth(0)
+                              << ":\t" << sample.period << '\n';
         }
-    }
 
-    static void buildTopDownResult(const QVector<FrameData>& bottomUpData, FrameData* topDownData)
-    {
-        foreach (const auto& row, bottomUpData) {
-            if (row.children.isEmpty()) {
-                // leaf node found, bubble up the parent chain to build a top-down tree
-                auto node = &row;
-                auto stack = topDownData;
-                while (node) {
-                    auto frame = addFrame(stack,
-                                          node->symbol, node->binary,
-                                          node->location, node->address);
+        bottomUpResult.costs.addTotalCost(sample.attributeId, sample.period);
+        auto parent = &bottomUpResult.root;
+        QSet<Data::Symbol> recursionGuard;
+        for (auto id : sample.frames) {
+            parent = addFrame(parent, id, &recursionGuard, sample.attributeId, sample.period);
+        }
 
-                    // always use the leaf node's cost and propagate that one up the chain
-                    // otherwise we'd count the cost of some nodes multiple times
-                    frame->inclusiveCost += row.inclusiveCost;
-                    if (node == &row) {
-                        frame->selfCost += 1;
-                    }
-                    stack = frame;
-                    node = node->parent;
-                }
-            } else {
-                // recurse to find a leaf
-                buildTopDownResult(row.children, topDownData);
-            }
+        if (perfScriptOutput) {
+            *perfScriptOutput << "\n";
         }
     }
 
     void buildTopDownResult()
     {
-        buildTopDownResult(bottomUpResult.children, &topDownResult);
-        FrameData::initializeParents(&topDownResult);
-    }
-
-    static void buildCallerCalleeResult(const QVector<FrameData>& bottomUpData, FrameData* callerCalleeData)
-    {
-        for (const FrameData& row : bottomUpData) {
-            if (row.children.isEmpty()) {
-                // leaf node found, bubble up the parent chain to add cost for all frames
-                // to the caller/callee data. this is done top-down since we must not count
-                // symbols more than once in the caller-callee data
-                QSet<CallerCalleeLocation> recursionGuard;
-                auto node = &row;
-
-                while (node) {
-                    CallerCalleeLocation needle{node->symbol, node->binary};
-                    if (!recursionGuard.contains(needle)) { // aggregate caller-callee data
-                        auto it = std::lower_bound(callerCalleeData->children.begin(), callerCalleeData->children.end(), needle,
-                            [](const FrameData& frame, const auto needle) { return CallerCalleeLocation{frame.symbol, frame.binary} < needle; });
-
-                        if (it == callerCalleeData->children.end() || CallerCalleeLocation{it->symbol, it->binary} != needle) {
-                            it = callerCalleeData->children.insert(it, {node->symbol, node->binary, node->location, node->address, 0, 0, {}, nullptr});
-                        }
-                        it->inclusiveCost += 1;
-                        if (!node->parent) {
-                            it->selfCost += 1;
-                        }
-                        recursionGuard.insert(needle);
-                    }
-                    node = node->parent;
-                }
-            } else {
-                // recurse to find a leaf
-                buildCallerCalleeResult(row.children, callerCalleeData);
-            }
-        }
+        topDownResult = Data::TopDownResults::fromBottomUp(bottomUpResult);
     }
 
     void buildCallerCalleeResult()
     {
-        buildCallerCalleeResult(bottomUpResult.children, &callerCalleeResult);
+        Data::callerCalleesFromBottomUpData(bottomUpResult, &callerCalleeResult);
     }
 
     void addSampleToSummary(const Sample& sample)
@@ -932,6 +890,15 @@ struct PerfParserPrivate
         uniqueThreads.insert(sample.tid);
         uniqueProcess.insert(sample.pid);
         ++summaryResult.sampleCount;
+
+        if (sample.attributeId < 0 || sample.attributeId >= summaryResult.costs.size()) {
+            qWarning() << "Unexpected attribute id:" << sample.attributeId
+                       << "Only know about" << summaryResult.costs.size() << "attributes so far";
+        } else {
+            auto& costSummary = summaryResult.costs[sample.attributeId];
+            ++costSummary.sampleCount;
+            costSummary.totalPeriod += sample.period;
+        }
     }
 
     void calculateSummary()
@@ -953,8 +920,28 @@ struct PerfParserPrivate
         auto args = features.cmdline;
         args.removeFirst();
         summaryResult.command = QLatin1String("perf ") + QString::fromUtf8(args.join(' '));
+        summaryResult.hostName = QString::fromUtf8(features.hostName);
+        summaryResult.linuxKernelVersion = QString::fromUtf8(features.osRelease);
+        summaryResult.perfVersion = QString::fromUtf8(features.version);
+        summaryResult.cpuDescription = QString::fromUtf8(features.cpuDesc);
+        summaryResult.cpuId = QString::fromUtf8(features.cpuId);
+        summaryResult.cpuArchitecture = QString::fromUtf8(features.arch);
+        summaryResult.cpusOnline = features.nrCpusOnline;
+        summaryResult.cpusAvailable = features.nrCpusAvailable;
+        auto formatCpuList = [](const QByteArrayList& list) -> QString {
+            return QString::fromUtf8('[' + list.join("], [") + ']');
+        };
+        summaryResult.cpuSiblingCores = formatCpuList(features.siblingCores);
+        summaryResult.cpuSiblingThreads = formatCpuList(features.siblingThreads);
+        summaryResult.totalMemoryInKiB = features.totalMem;
+    }
 
-        // TODO: add system info to summary page
+    void addError(const Error& error)
+    {
+        if (!encounteredErrors.contains(error.message)) {
+            summaryResult.errors << error.message;
+            encounteredErrors.insert(error.message);
+        }
     }
 
     enum State {
@@ -966,7 +953,7 @@ struct PerfParserPrivate
     };
 
     enum class EventType {
-        Sample,
+        Sample43, // backwards compatibility
         ThreadStart,
         ThreadEnd,
         Command,
@@ -976,6 +963,9 @@ struct PerfParserPrivate
         StringDefinition,
         LostDefinition,
         FeaturesDefinition,
+        Error,
+        Sample,
+        Progress,
         InvalidType
     };
 
@@ -983,10 +973,8 @@ struct PerfParserPrivate
     quint32 eventSize = 0;
     QBuffer buffer;
     QDataStream stream;
-    FrameData bottomUpResult;
-    FrameData topDownResult;
     QVector<AttributesDefinition> attributes;
-    QVector<SymbolData> symbols;
+    QVector<Data::Symbol> symbols;
     QVector<LocationData> locations;
     QVector<QString> strings;
     QProcess process;
@@ -995,7 +983,15 @@ struct PerfParserPrivate
     quint64 applicationEndTime = 0;
     QSet<quint32> uniqueThreads;
     QSet<quint32> uniqueProcess;
-    FrameData callerCalleeResult;
+    quint32 maxBottomUpId = 0;
+    Data::BottomUpResults bottomUpResult;
+    Data::TopDownResults topDownResult;
+    Data::CallerCalleeResults callerCalleeResult;
+    QHash<quint32, QHash<quint32, QString>> commands;
+    QScopedPointer<QTextStream> perfScriptOutput;
+    std::function<void(float)> progressHandler;
+    QSet<qint32> reportedMissingDebugInfoModules;
+    QSet<QString> encounteredErrors;
 };
 
 PerfParser::PerfParser(QObject* parent)
@@ -1005,7 +1001,10 @@ PerfParser::PerfParser(QObject* parent)
 
 PerfParser::~PerfParser() = default;
 
-void PerfParser::startParseFile(const QString& path)
+void PerfParser::startParseFile(const QString& path, const QString& sysroot,
+                                const QString& kallsyms, const QString& debugPaths,
+                                const QString& extraLibPaths, const QString& appPath,
+                                const QString& arch)
 {
     QFileInfo info(path);
     if (!info.exists()) {
@@ -1021,15 +1020,43 @@ void PerfParser::startParseFile(const QString& path)
         return;
     }
 
-    const auto parserBinary = Util::findLibexecBinary(QStringLiteral("hotspot-perfparser"));
+    auto parserBinary = QString::fromLocal8Bit(qgetenv("HOTSPOT_PERFPARSER"));
+    if (parserBinary.isEmpty()) {
+        parserBinary = Util::findLibexecBinary(QStringLiteral("hotspot-perfparser"));
+    }
     if (parserBinary.isEmpty()) {
         emit parsingFailed(tr("Failed to find hotspot-perfparser binary."));
         return;
     }
 
+    QStringList parserArgs = {
+        QStringLiteral("--input"), path,
+        QStringLiteral("--max-frames"), QStringLiteral("1024")
+    };
+    if (!sysroot.isEmpty()) {
+        parserArgs += {QStringLiteral("--sysroot"), sysroot};
+    }
+    if (!kallsyms.isEmpty()) {
+        parserArgs += {QStringLiteral("--kallsyms"), kallsyms};
+    }
+    if (!debugPaths.isEmpty()) {
+        parserArgs += {QStringLiteral("--debug"), debugPaths};
+    }
+    if (!extraLibPaths.isEmpty()) {
+        parserArgs += {QStringLiteral("--extra"), extraLibPaths};
+    }
+    if (!appPath.isEmpty()) {
+        parserArgs += {QStringLiteral("--app"), appPath};
+    }
+    if (!arch.isEmpty()) {
+        parserArgs += {QStringLiteral("--arch"), arch};
+    }
+
     using namespace ThreadWeaver;
-    stream() << make_job([path, parserBinary, this]() {
-        PerfParserPrivate d;
+    stream() << make_job([parserBinary, parserArgs, this]() {
+        PerfParserPrivate d([this](float percent) {
+            emit progress(percent);
+        });
 
         connect(&d.process, &QProcess::readyRead,
                 [&d] {
@@ -1042,15 +1069,43 @@ void PerfParser::startParseFile(const QString& path)
                 [&d, this] (int exitCode, QProcess::ExitStatus exitStatus) {
                     qCDebug(LOG_PERFPARSER) << exitCode << exitStatus;
 
-                    if (exitCode == EXIT_SUCCESS) {
-                        d.finalize();
-                        emit bottomUpDataAvailable(d.bottomUpResult);
-                        emit topDownDataAvailable(d.topDownResult);
-                        emit summaryDataAvailable(d.summaryResult);
-                        emit callerCalleeDataAvailable(d.callerCalleeResult);
-                        emit parsingFinished();
-                    } else {
-                        emit parsingFailed(tr("The hotspot-perfparser binary exited with code %1.").arg(exitCode));
+                    enum ErrorCodes {
+                        NoError,
+                        TcpSocketError,
+                        CannotOpen,
+                        BadMagic,
+                        HeaderError,
+                        DataError,
+                        MissingData,
+                        InvalidOption
+                    };
+                    switch (exitCode) {
+                        case NoError:
+                            d.finalize();
+                            emit bottomUpDataAvailable(d.bottomUpResult);
+                            emit topDownDataAvailable(d.topDownResult);
+                            emit summaryDataAvailable(d.summaryResult);
+                            emit callerCalleeDataAvailable(d.callerCalleeResult);
+                            emit parsingFinished();
+                            break;
+                        case TcpSocketError:
+                            emit parsingFailed(tr("The hotspot-perfparser binary exited with code %1 (TCP socket error).").arg(exitCode));
+                            break;
+                        case CannotOpen:
+                            emit parsingFailed(tr("The hotspot-perfparser binary exited with code %1 (file could not be opened).").arg(exitCode));
+                            break;
+                        case BadMagic:
+                        case HeaderError:
+                        case DataError:
+                        case MissingData:
+                            emit parsingFailed(tr("The hotspot-perfparser binary exited with code %1 (invalid perf data file).").arg(exitCode));
+                            break;
+                        case InvalidOption:
+                            emit parsingFailed(tr("The hotspot-perfparser binary exited with code %1 (invalid option).").arg(exitCode));
+                            break;
+                        default:
+                            emit parsingFailed(tr("The hotspot-perfparser binary exited with code %1.").arg(exitCode));
+                            break;
                     }
                 });
 
@@ -1061,11 +1116,11 @@ void PerfParser::startParseFile(const QString& path)
                     emit parsingFailed(d.process.errorString());
                 });
 
-        d.process.start(parserBinary, {QStringLiteral("--input"), path});
+        d.process.start(parserBinary, parserArgs);
         if (!d.process.waitForStarted()) {
             emit parsingFailed(tr("Failed to start the hotspot-perfparser process"));
             return;
         }
-        d.process.waitForFinished();
+        d.process.waitForFinished(-1);
     });
 }

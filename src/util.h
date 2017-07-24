@@ -47,4 +47,8 @@ struct HashCombine {
     { return seed ^ (qHash(t) + 0x9e3779b9 + (seed << 6) + (seed >> 2)) ; }
 };
 
+QString formatString(const QString& input);
+QString formatCost(quint64 cost);
+QString formatCostRelative(quint64 selfCost, quint64 totalCost, bool addPercentSign = false);
+
 }

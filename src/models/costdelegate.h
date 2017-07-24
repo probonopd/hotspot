@@ -1,5 +1,5 @@
 /*
-  costmodel.h
+  costdelegate.cpp
 
   This file is part of Hotspot, the Qt GUI for performance analysis.
 
@@ -27,48 +27,18 @@
 
 #pragma once
 
-#include <QAbstractItemModel>
+#include <QStyledItemDelegate>
 
-#include "framedata.h"
-
-class CostModel : public QAbstractItemModel
+class CostDelegate : public QStyledItemDelegate
 {
     Q_OBJECT
 public:
-    CostModel(QObject* parent = nullptr);
-    ~CostModel();
+    explicit CostDelegate(quint32 sortRole, quint32 totalCostRole, QObject* parent = nullptr);
+    ~CostDelegate();
 
-    enum Columns {
-        // TODO: extend
-        Symbol = 0,
-        Binary,
-        Address,
-        Location,
-        SelfCost,
-        InclusiveCost,
-        NUM_COLUMNS
-    };
-
-    enum Roles {
-        SortRole = Qt::UserRole,
-        FilterRole
-    };
-
-    int columnCount(const QModelIndex& parent = {}) const override;
-    int rowCount(const QModelIndex& parent = {}) const override;
-
-    QModelIndex index(int row, int column, const QModelIndex& parent) const override;
-    QModelIndex parent(const QModelIndex& child) const override;
-
-    QVariant headerData(int section, Qt::Orientation orientation, int role) const override;
-    QVariant data(const QModelIndex& index, int role) const override;
-
-    using QAbstractItemModel::setData;
-    void setData(const FrameData& data);
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override;
 
 private:
-    const FrameData* itemFromIndex(const QModelIndex& index) const;
-    QModelIndex indexFromItem(const FrameData* item, int column) const;
-
-    FrameData m_root;
+    quint32 m_sortRole;
+    quint32 m_totalCostRole;
 };

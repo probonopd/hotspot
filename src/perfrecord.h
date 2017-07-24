@@ -1,10 +1,10 @@
 /*
-  framedata.cpp
+  perfrecord.h
 
   This file is part of Hotspot, the Qt GUI for performance analysis.
 
   Copyright (C) 2017 Klarälvdalens Datakonsult AB, a KDAB Group company, info@kdab.com
-  Author: Milian Wolff <milian.wolff@kdab.com>
+  Author: Nate Rogers <nate.rogers@kdab.com>
 
   Licensees holding valid commercial KDAB Hotspot licenses may use this file in
   accordance with Hotspot Commercial License Agreement provided with the Software.
@@ -25,23 +25,28 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "framedata.h"
+#pragma once
 
-namespace {
-void setParents(QVector<FrameData>* children, const FrameData* parent)
-{
-    for (auto& frame : *children) {
-        frame.parent = parent;
-        setParents(&frame.children, &frame);
-    }
-}
-}
+#include <QObject>
 
-void FrameData::initializeParents(FrameData* tree)
+class QProcess;
+
+class PerfRecord : public QObject
 {
-    // root has no parent
-    Q_ASSERT(tree->parent == nullptr);
-    // but neither do the top items have a parent. those belong to the "root" above
-    // which has a different address for every model since we use value semantics
-    setParents(&tree->children, nullptr);
-}
+    Q_OBJECT
+public:
+    PerfRecord(QObject* parent = nullptr);
+    ~PerfRecord();
+
+    void record(const QStringList &perfOptions, const QString &outputPath,
+                const QString &exePath, const QStringList &exeOptions);
+    const QString perfCommand();
+
+signals:
+    void recordingFinished(const QString &fileLocation);
+    void recordingFailed(const QString &errorMessage);
+
+private:
+    QProcess *m_perfRecordProcess;
+    QString m_outputPath;
+};
