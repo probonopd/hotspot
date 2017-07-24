@@ -29,7 +29,7 @@ script:
   - cmake .. -DCMAKE_INSTALL_PREFIX=/usr
   - make -j$(nproc)
   - make DESTDIR=appdir install ; find appdir/
-  - mdkir -p appdir/usr/share/applications/ # FIXME: Do in CMakeLists.txt
+  - mkdir -p appdir/usr/share/applications/ # FIXME: Do in CMakeLists.txt
   - cp ../hotspot.desktop appdir/usr/share/applications/ # FIXME: Do in CMakeLists.txt
   - wget -c "https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage" 
   - chmod a+x linuxdeployqt*.AppImage
