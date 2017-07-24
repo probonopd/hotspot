@@ -28,16 +28,46 @@
 #pragma once
 
 #include <QTypeInfo>
+#include <QVector>
+#include <QStringList>
 
 struct SummaryData
 {
     quint64 applicationRunningTime = 0;
     quint32 threadCount = 0;
     quint32 processCount = 0;
-    quint64 sampleCount = 0;
     QString command;
     quint64 lostChunks = 0;
+    QString hostName;
+    QString linuxKernelVersion;
+    QString perfVersion;
+    QString cpuDescription;
+    QString cpuId;
+    QString cpuArchitecture;
+    quint32 cpusOnline = 0;
+    quint32 cpusAvailable = 0;
+    QString cpuSiblingCores;
+    QString cpuSiblingThreads;
+    quint64 totalMemoryInKiB = 0;
+
+    // total number of samples
+    quint64 sampleCount = 0;
+    struct CostSummary
+    {
+        CostSummary() = default;
+        CostSummary(const QString &label, quint64 sampleCount, quint64 totalPeriod)
+            : label(label), sampleCount(sampleCount), totalPeriod(totalPeriod)
+        {}
+
+        QString label;
+        quint64 sampleCount = 0;
+        quint64 totalPeriod = 0;
+    };
+    QVector<CostSummary> costs;
+
+    QStringList errors;
 };
 
 Q_DECLARE_METATYPE(SummaryData)
 Q_DECLARE_TYPEINFO(SummaryData, Q_MOVABLE_TYPE);
+Q_DECLARE_TYPEINFO(SummaryData::CostSummary, Q_MOVABLE_TYPE);

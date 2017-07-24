@@ -31,14 +31,21 @@
 #include <QScopedPointer>
 #include <QString>
 
-#include "models/framedata.h"
+#include <KSharedConfig>
 
 namespace Ui {
 class MainWindow;
 }
 
-class CostModel;
+namespace Data {
+struct Symbol;
+}
+
 class PerfParser;
+class CallerCalleeModel;
+class QSortFilterProxyModel;
+class QTreeView;
+class KRecentFilesAction;
 
 class MainWindow : public QMainWindow
 {
@@ -48,9 +55,21 @@ public:
     explicit MainWindow(QWidget *parent = 0);
     ~MainWindow();
 
+    void setSysroot(const QString& path);
+    void setKallsyms(const QString& path);
+    void setDebugPaths(const QString& paths);
+    void setExtraLibPaths(const QString& paths);
+    void setAppPath(const QString& path);
+    void setArch(const QString& arch);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void changeEvent(QEvent* event) override;
+
 public slots:
     void clear();
     void openFile(const QString& path);
+    void openFile(const QUrl& url);
 
     void aboutKDAB();
     void aboutHotspot();
@@ -58,7 +77,33 @@ public slots:
 private slots:
     void on_openFileButton_clicked();
 
+    void customContextMenu(const QPoint &point, QTreeView* view, int symbolRole);
+    void onBottomUpContextMenu(const QPoint &pos);
+    void onTopDownContextMenu(const QPoint &pos);
+    void jumpToCallerCallee(const Data::Symbol &symbol);
+
+    void navigateToCode(const QString &url, int lineNumber, int columnNumber);
+    void setCodeNavigationIDE(QAction *action);
+
+    void onSourceMapContextMenu(const QPoint &pos);
+
 private:
-    Ui::MainWindow *ui;
+    void showError(const QString& errorMessage);
+    void updateBackground();
+    void setupCodeNavigationMenu();
+    void setupPathSettingsMenu();
+
+    QScopedPointer<Ui::MainWindow> ui;
     PerfParser* m_parser;
+    CallerCalleeModel* m_callerCalleeCostModel;
+    QSortFilterProxyModel* m_callerCalleeProxy;
+    QString m_sysroot;
+    QString m_kallsyms;
+    QString m_debugPaths;
+    QString m_extraLibPaths;
+    QString m_appPath;
+    QString m_arch;
+    QPixmap m_background;
+    KRecentFilesAction* m_recentFilesAction = nullptr;
+    KSharedConfigPtr m_config;
 };

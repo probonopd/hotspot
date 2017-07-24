@@ -26,115 +26,175 @@
 */
 
 #include "callercalleemodel.h"
+#include "../util.h"
+
+#include <QDebug>
 
 CallerCalleeModel::CallerCalleeModel(QObject* parent)
-    : QAbstractTableModel(parent)
+    : HashModel(parent)
 {
 }
 
 CallerCalleeModel::~CallerCalleeModel() = default;
 
-int CallerCalleeModel::columnCount(const QModelIndex& parent) const
+void CallerCalleeModel::setResults(const Data::CallerCalleeResults& results)
 {
-    return parent.isValid() ? 0 : NUM_COLUMNS;
+    m_results = results;
+    setRows(results.entries);
 }
 
-int CallerCalleeModel::rowCount(const QModelIndex& parent) const
+QVariant CallerCalleeModel::headerCell(int column, int role) const
 {
-    return parent.isValid() ? 0 : m_root.children.size();
-}
-
-QVariant CallerCalleeModel::headerData(int section, Qt::Orientation orientation, int role) const
-{
-    if (role == Qt::InitialSortOrderRole) {
-        if (section == SelfCost || section == InclusiveCost)
-        {
-            return Qt::DescendingOrder;
+    if (role == Qt::InitialSortOrderRole && column > Binary) {
+        return Qt::DescendingOrder;
+    } else if (role == Qt::DisplayRole) {
+        switch (column) {
+            case Symbol:
+                return tr("Symbol");
+            case Binary:
+                return tr("Binary");
         }
-    }
-    if (role != Qt::DisplayRole || orientation != Qt::Horizontal) {
-        return {};
-    }
+        column -= NUM_BASE_COLUMNS;
+        if (column < m_results.selfCosts.numTypes()) {
+            return tr("%1 (self)").arg(m_results.selfCosts.typeName(column));
+        }
+        column -= m_results.selfCosts.numTypes();
+        return tr("%1 (incl.)").arg(m_results.inclusiveCosts.typeName(column));
+    } else if (role == Qt::ToolTipRole) {
+        switch (column) {
+            case Symbol:
+                return tr("The symbol's function name. May be empty when debug information is missing.");
+            case Binary:
+                return tr("The name of the executable the symbol resides in. May be empty when debug information is missing.");
+        }
 
-    switch (static_cast<Columns>(section)) {
-        case Symbol:
-            return tr("Symbol");
-        case Binary:
-            return tr("Binary");
-        case Location:
-            return tr("Location");
-        case Address:
-            return tr("Address");
-        case SelfCost:
-            return tr("Self Cost");
-        case InclusiveCost:
-            return tr("Inclusive Cost");
-        case NUM_COLUMNS:
-            // fall-through
-            break;
+        column -= 2;
+        if (column < m_results.selfCosts.numTypes()) {
+            return tr("The aggregated sample costs directly attributed to this symbol.");
+        }
+        column -= m_results.selfCosts.numTypes();
+        return tr("The aggregated sample costs attributed to this symbol, both directly and indirectly. This includes the costs of all functions called by this symbol plus its self cost.");
     }
 
     return {};
 }
 
-QVariant CallerCalleeModel::data(const QModelIndex& index, int role) const
+QVariant CallerCalleeModel::cell(int column, int role, const Data::Symbol& symbol,
+                                 const Data::CallerCalleeEntry& entry) const
 {
-    if (!hasIndex(index.row(), index.column(), index.parent())) {
-        return {};
-    }
-
-    const auto& item = m_root.children.at(index.row());
-
     if (role == SortRole) {
-        switch (static_cast<Columns>(index.column())) {
+        switch (column) {
             case Symbol:
-                return item.symbol;
+                return symbol.symbol;
             case Binary:
-                return item.binary;
-            case Location:
-                return item.location;
-            case Address:
-                return item.address;
-            case SelfCost:
-                return item.selfCost;
-            case InclusiveCost:
-                return item.inclusiveCost;
-            case NUM_COLUMNS:
-                // do nothing
-                break;
+                return symbol.binary;
         }
+        column -= NUM_BASE_COLUMNS;
+        if (column < m_results.selfCosts.numTypes()) {
+            return m_results.selfCosts.cost(column, entry.id);
+        }
+        column -= m_results.selfCosts.numTypes();
+        return m_results.inclusiveCosts.cost(column, entry.id);
+    } else if (role == TotalCostRole && column >= NUM_BASE_COLUMNS) {
+        column -= NUM_BASE_COLUMNS;
+        if (column < m_results.selfCosts.numTypes()) {
+            return m_results.selfCosts.totalCost(column);
+        }
+
+        column -= m_results.selfCosts.numTypes();
+        return m_results.inclusiveCosts.totalCost(column);
     } else if (role == FilterRole) {
         // TODO: optimize this
-        return QString(item.symbol + item.binary + item.location);
+        return QString(symbol.symbol + symbol.binary);
     } else if (role == Qt::DisplayRole) {
-        // TODO: show fractional cost
-        switch (static_cast<Columns>(index.column())) {
+        switch (column) {
             case Symbol:
-                return item.symbol;
+                return symbol.symbol.isEmpty() ? tr("??") : symbol.symbol;
             case Binary:
-                return item.binary;
-            case Location:
-                return item.location;
-            case Address:
-                return item.address;
-            case SelfCost:
-                return item.selfCost;
-            case InclusiveCost:
-                return item.inclusiveCost;
-            case NUM_COLUMNS:
-                // do nothing
-                break;
+                return symbol.binary;
         }
+        column -= 2;
+        if (column < m_results.selfCosts.numTypes()) {
+            return Util::formatCostRelative(m_results.selfCosts.cost(column, entry.id),
+                                            m_results.selfCosts.totalCost(column), true);
+        }
+        column -= m_results.selfCosts.numTypes();
+        return Util::formatCostRelative(m_results.inclusiveCosts.cost(column, entry.id),
+                                        m_results.inclusiveCosts.totalCost(column), true);
+    } else if (role == CalleesRole) {
+        return QVariant::fromValue(entry.callees);
+    } else if (role == CallersRole) {
+        return QVariant::fromValue(entry.callers);
+    } else if (role == SourceMapRole) {
+        return QVariant::fromValue(entry.sourceMap);
+    } else if (role == SelfCostsRole) {
+        return QVariant::fromValue(m_results.selfCosts);
+    } else if (role == InclusiveCostsRole) {
+        return QVariant::fromValue(m_results.inclusiveCosts);
+    } else if (role == Qt::ToolTipRole) {
+        QString toolTip = QObject::tr("%1 in %2")
+                            .arg(Util::formatString(symbol.symbol), Util::formatString(symbol.binary))
+                        + QLatin1Char('\n');
+        Q_ASSERT(m_results.selfCosts.numTypes() == m_results.inclusiveCosts.numTypes());
+        for (int i = 0, c = m_results.selfCosts.numTypes(); i < c; ++i) {
+            const auto selfCost = m_results.selfCosts.cost(i, entry.id);
+            const auto selfTotal = m_results.selfCosts.totalCost(i);
+            toolTip += QObject::tr("%1 (self): %2 out of %3 total (%4%)")
+                        .arg(m_results.selfCosts.typeName(i), Util::formatCost(selfCost), Util::formatCost(selfTotal),
+                            Util::formatCostRelative(selfCost, selfTotal))
+                    + QLatin1Char('\n');
+            const auto inclusiveCost = m_results.inclusiveCosts.cost(i, entry.id);
+            const auto inclusiveTotal = m_results.inclusiveCosts.totalCost(i);
+            toolTip += QObject::tr("%1 (incl.): %2 out of %3 total (%4%)")
+                        .arg(m_results.inclusiveCosts.typeName(i), Util::formatCost(inclusiveCost), Util::formatCost(inclusiveTotal),
+                            Util::formatCostRelative(inclusiveCost, inclusiveTotal))
+                    + QLatin1Char('\n');
+        }
+        return toolTip;
     }
-
-    // TODO: tooltips
 
     return {};
 }
 
-void CallerCalleeModel::setData(const FrameData& data)
+QModelIndex CallerCalleeModel::indexForSymbol(const Data::Symbol& symbol) const
 {
-    beginResetModel();
-    m_root = data;
-    endResetModel();
+    return indexForKey(symbol);
+}
+
+CallerModel::CallerModel(QObject* parent)
+    : SymbolCostModelImpl(parent)
+{
+}
+
+CallerModel::~CallerModel() = default;
+
+QString CallerModel::symbolHeader() const
+{
+    return tr("Caller");
+}
+
+CalleeModel::CalleeModel(QObject* parent)
+    : SymbolCostModelImpl(parent)
+{
+}
+
+CalleeModel::~CalleeModel() = default;
+
+QString CalleeModel::symbolHeader() const
+{
+    return tr("Callee");
+}
+
+SourceMapModel::SourceMapModel(QObject* parent)
+    : LocationCostModelImpl(parent)
+{
+}
+
+SourceMapModel::~SourceMapModel() = default;
+
+int CallerCalleeModel::numColumns() const
+{
+    return NUM_BASE_COLUMNS
+        + m_results.inclusiveCosts.numTypes()
+        + m_results.selfCosts.numTypes();
 }

@@ -31,22 +31,67 @@
 
 #include "hotspot-config.h"
 #include "mainwindow.h"
-#include "models/framedata.h"
+#include "models/data.h"
 #include "models/summarydata.h"
 
 int main(int argc, char** argv)
 {
-    QApplication app(argc, argv);
-    qRegisterMetaType<FrameData>();
-    qRegisterMetaType<SummaryData>();
+    QCoreApplication::setOrganizationName(QStringLiteral("KDAB"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("kdab.com"));
+    QCoreApplication::setApplicationName(QStringLiteral("hotspot"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(HOTSPOT_VERSION_STRING));
 
-    app.setApplicationName(QStringLiteral("hotspot"));
-    app.setApplicationVersion(QStringLiteral(HOTSPOT_VERSION_STRING));
+    QApplication app(argc, argv);
+    app.setWindowIcon(QIcon::fromTheme(QStringLiteral("hotspot"), app.windowIcon()));
+    qRegisterMetaType<SummaryData>();
+    qRegisterMetaType<Data::BottomUp>();
+    qRegisterMetaType<Data::TopDown>();
+    qRegisterMetaType<Data::CallerCalleeEntryMap>("Data::CallerCalleeEntryMap");
+    qRegisterMetaType<Data::BottomUpResults>();
+    qRegisterMetaType<Data::TopDownResults>();
+    qRegisterMetaType<Data::CallerCalleeResults>();
+
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Qt GUI for performance analysis."));
+    parser.setApplicationDescription(QStringLiteral("Linux perf GUI for performance analysis."));
     parser.addHelpOption();
     parser.addVersionOption();
+
+    QCommandLineOption sysroot(QLatin1String("sysroot"),
+                               QCoreApplication::translate(
+                                   "main", "Path to sysroot which is used to find libraries."),
+                               QLatin1String("path"));
+    parser.addOption(sysroot);
+
+    QCommandLineOption kallsyms(QLatin1String("kallsyms"),
+                               QCoreApplication::translate(
+                                   "main", "Path to kallsyms file which is used to resolve kernel symbols."),
+                               QLatin1String("path"));
+    parser.addOption(kallsyms);
+
+    QCommandLineOption debugPaths(QLatin1String("debugPaths"),
+                               QCoreApplication::translate(
+                                   "main", "Colon separated list of paths that contain debug information."),
+                               QLatin1String("paths"));
+    parser.addOption(debugPaths);
+
+    QCommandLineOption extraLibPaths(QLatin1String("extraLibPaths"),
+                               QCoreApplication::translate(
+                                   "main", "Colon separated list of extra paths to find libraries."),
+                               QLatin1String("paths"));
+    parser.addOption(extraLibPaths);
+
+    QCommandLineOption appPath(QLatin1String("appPath"),
+                               QCoreApplication::translate(
+                                   "main", "Path to folder containing the application executable and libraries."),
+                               QLatin1String("path"));
+    parser.addOption(appPath);
+
+    QCommandLineOption arch(QLatin1String("arch"),
+                               QCoreApplication::translate(
+                                   "main", "Architecture to use for unwinding."),
+                               QLatin1String("path"));
+    parser.addOption(arch);
 
     parser.addPositionalArgument(QStringLiteral("files"),
         QCoreApplication::translate("main", "Optional input files to open on startup, i.e. perf.data files."),
@@ -54,8 +99,30 @@ int main(int argc, char** argv)
 
     parser.process(app);
 
+    auto applyCliArgs = [&] (MainWindow *window) {
+        if (parser.isSet(sysroot)) {
+            window->setSysroot(parser.value(sysroot));
+        }
+        if (parser.isSet(kallsyms)) {
+            window->setKallsyms(parser.value(kallsyms));
+        }
+        if (parser.isSet(debugPaths)) {
+            window->setDebugPaths(parser.value(debugPaths));
+        }
+        if (parser.isSet(extraLibPaths)) {
+            window->setExtraLibPaths(parser.value(extraLibPaths));
+        }
+        if (parser.isSet(appPath)) {
+            window->setAppPath(parser.value(appPath));
+        }
+        if (parser.isSet(arch)) {
+            window->setArch(parser.value(arch));
+        }
+    };
+
     for (const auto& file : parser.positionalArguments()) {
         auto window = new MainWindow;
+        applyCliArgs(window);
         window->openFile(file);
         window->show();
     }
@@ -63,6 +130,7 @@ int main(int argc, char** argv)
     // show at least one mainwindow
     if (parser.positionalArguments().isEmpty()) {
         auto window = new MainWindow;
+        applyCliArgs(window);
 
         // open perf.data in current CWD, if it exists
         // this brings hotspot closer to the behavior of "perf report"

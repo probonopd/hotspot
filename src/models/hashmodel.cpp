@@ -1,5 +1,5 @@
 /*
-  framedata.h
+  hashmodel.cpp
 
   This file is part of Hotspot, the Qt GUI for performance analysis.
 
@@ -25,27 +25,4 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
-
-#include <QString>
-#include <QVector>
-#include <QObject>
-
-struct FrameData
-{
-    // TODO: shared location class with dso, file, line, ...
-    QString symbol;
-    QString binary;
-    QString location;
-    QString address;
-    // TODO: abstract that away: there may be multiple costs per frame
-    quint32 selfCost = 0;
-    quint32 inclusiveCost = 0;
-    QVector<FrameData> children;
-    const FrameData* parent = nullptr;
-
-    static void initializeParents(FrameData* tree);
-};
-
-Q_DECLARE_METATYPE(FrameData)
-Q_DECLARE_TYPEINFO(FrameData, Q_MOVABLE_TYPE);
+#include "hashmodel.h"
