@@ -31,12 +31,13 @@ script:
   - wget -c "https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage" 
   - chmod a+x linuxdeployqt*.AppImage
   - unset QTDIR; unset QT_PLUGIN_PATH ; unset LD_LIBRARY_PATH
-  - ./linuxdeployqt*.AppImage ./appdir/usr/bin/hotspot -bundle-non-qt-libs
+  - find appdir/
+  - ./linuxdeployqt*.AppImage ./appdir/usr/share/applications/*.desktop -bundle-non-qt-libs
   # Workaround for https://github.com/probonopd/linuxdeployqt/issues/83 - no longer needed?
   # - ./linuxdeployqt*.AppImage --appimage-extract
   # - ./squashfs-root/usr/bin/patchelf --set-rpath '$ORIGIN/../..' ./appdir/usr/lib/hotspot/libexec/*
   # Apparently the qt_prfxpath in libQt5Core.so
   # is not relative to libQt5Core.so but to the binary that is being executed, is this clever?
-  - ( cd ./appdir/usr/lib/hotspot/ ;  ln -s ../../plugins/ . )
-  - ./linuxdeployqt*.AppImage ./appdir/usr/bin/hotspot -appimage 
+  # - ( cd ./appdir/usr/lib/hotspot/ ;  ln -s ../../plugins/ . )
+  - ./linuxdeployqt*.AppImage ./appdir/usr/share/applications/*.desktop -appimage 
   - curl --upload-file ./Hotspot-*.AppImage https://transfer.sh/Hotspot-git.$(git rev-parse --short HEAD)-x86_64.AppImage
